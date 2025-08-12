@@ -58,7 +58,7 @@ if "df" in st.session_state:
         filtered_df = st.session_state["df"]
     st.dataframe(filtered_df)
     
-    st.subheader("Sentiment Score Distribution for {product}")
+    st.subheader(f"Sentiment Score Distribution for {product}")
     # Create matplotlib histogram
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.hist(filtered_df["SENTIMENT_SCORE"], bins=10, edgecolor='black', alpha=0.7)

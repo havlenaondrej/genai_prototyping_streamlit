@@ -58,7 +58,7 @@ if "df" in st.session_state:
         filtered_df = st.session_state["df"]
     st.dataframe(filtered_df)
     
-    st.subheader("Sentiment Score Distribution for {product}")
+    st.subheader(f"Sentiment Score Distribution for {product}")
     # Create Plotly histogram
     fig = px.histogram(
         filtered_df, 
