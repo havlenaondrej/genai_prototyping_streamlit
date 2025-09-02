@@ -6,3 +6,4 @@ altair
 matplotlib
 python-dotenv
 openai
+sqlalchemy
