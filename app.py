@@ -32,10 +32,19 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 
 openai_client: Optional[openai.OpenAI] = None
+anthropic_client = None
 if OPENAI_API_KEY:
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+if ANTHROPIC_API_KEY:
+    try:
+        import anthropic
+        anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    except ImportError:
+        pass
 
 
 # -------------------------------
@@ -150,6 +159,37 @@ class Contexts(Base):
     __tablename__ = "contexts"
     id = Column(Integer, primary_key=True)
     name = Column(String(100), unique=True, nullable=False)
+
+
+class MicroApp(Base):
+    __tablename__ = "micro_apps"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    streamlit_code = Column(Text, nullable=False)
+    mcp_server_code = Column(Text, nullable=True)
+    context = Column(String(100), default="General")
+    created_by = Column(String(255), default="user")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Integer, default=1)  # 1=active, 0=inactive
+
+
+class Team(Base):
+    __tablename__ = "teams"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    created_by = Column(String(255), default="user")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+    id = Column(Integer, primary_key=True)
+    team_id = Column(Integer, ForeignKey("teams.id"))
+    user_name = Column(String(255), nullable=False)
+    role = Column(String(50), default="member")  # owner, admin, member, viewer
+    joined_at = Column(DateTime, default=datetime.utcnow)
 
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "brainio.db")
@@ -633,13 +673,22 @@ def cocreate_section(session):
                     session.commit()
                     st.rerun()
             with col_u2:
+                # Model selector
+                model_choice = st.selectbox("Model", 
+                    options=["OpenAI GPT-4", "Claude 3.5 Sonnet", "Local Fallback"],
+                    index=0 if openai_client else (1 if anthropic_client else 2),
+                    key=f"model_choice_{selected_cid}")
+                
                 if st.button("Ask model", key=f"conv_model_{selected_cid}"):
                     # Build messages from turns
                     messages = []
                     for t in session.query(Turn).filter(Turn.conversation_id == selected_cid).order_by(Turn.created_at.asc()).all():
                         messages.append({"role": t.role, "content": t.content})
+                    
                     model_reply = "Model unavailable."
-                    if openai_client and messages:
+                    model_name = "local"
+                    
+                    if model_choice == "OpenAI GPT-4" and openai_client and messages:
                         try:
                             resp = openai_client.responses.create(
                                 model=OPENAI_MODEL,
@@ -648,9 +697,28 @@ def cocreate_section(session):
                                 max_output_tokens=500,
                             )
                             model_reply = resp.output[0].content[0].text
+                            model_name = OPENAI_MODEL
                         except Exception:
-                            model_reply = "(Error calling model)"
-                    session.add(Turn(conversation_id=selected_cid, role="assistant", author=OPENAI_MODEL if openai_client else "local", content=model_reply))
+                            model_reply = "(Error calling OpenAI)"
+                    
+                    elif model_choice == "Claude 3.5 Sonnet" and anthropic_client and messages:
+                        try:
+                            resp = anthropic_client.messages.create(
+                                model=ANTHROPIC_MODEL,
+                                max_tokens=500,
+                                temperature=0.4,
+                                messages=[{"role": m["role"], "content": m["content"]} for m in messages]
+                            )
+                            model_reply = resp.content[0].text
+                            model_name = ANTHROPIC_MODEL
+                        except Exception:
+                            model_reply = "(Error calling Claude)"
+                    
+                    else:
+                        model_reply = "No AI model available. Please set API keys in .env file."
+                        model_name = "local"
+                    
+                    session.add(Turn(conversation_id=selected_cid, role="assistant", author=model_name, content=model_reply))
                     session.commit()
                     st.rerun()
             with col_u3:
@@ -737,9 +805,247 @@ def importers_section(session):
     st.success(f"Imported {imported_count} conversation(s) into context '{current_context}'.")
 
 
+def appbeelder_section(session):
+    st.subheader("Appbeelder - Micro-App Builder")
+    
+    # Create new micro-app
+    with st.expander("Create Micro-App", expanded=False):
+        app_name = st.text_input("App Name", key="app_name")
+        app_desc = st.text_area("Description", key="app_desc")
+        app_prompt = st.text_area("Describe what the app should do", height=120, key="app_prompt")
+        
+        if st.button("Generate App", key="gen_app") and app_prompt.strip():
+            # Generate Streamlit code using AI
+            code_prompt = f"""Create a Streamlit app that: {app_prompt}
+
+Requirements:
+- Use streamlit as st
+- Make it functional and user-friendly
+- Include proper error handling
+- Add comments explaining key parts
+- Return only the Python code, no markdown formatting"""
+
+            streamlit_code = None
+            mcp_code = None
+            
+            # Try OpenAI first, then Anthropic
+            if openai_client:
+                try:
+                    resp = openai_client.responses.create(
+                        model=OPENAI_MODEL,
+                        input=[{"role": "user", "content": code_prompt}],
+                        temperature=0.3,
+                        max_output_tokens=2000,
+                    )
+                    streamlit_code = resp.output[0].content[0].text
+                except Exception:
+                    pass
+            
+            if not streamlit_code and anthropic_client:
+                try:
+                    resp = anthropic_client.messages.create(
+                        model=ANTHROPIC_MODEL,
+                        max_tokens=2000,
+                        temperature=0.3,
+                        messages=[{"role": "user", "content": code_prompt}]
+                    )
+                    streamlit_code = resp.content[0].text
+                except Exception:
+                    pass
+            
+            if not streamlit_code:
+                streamlit_code = f"""import streamlit as st
+
+st.title("{app_name}")
+st.write("{app_desc}")
+
+# TODO: Implement based on: {app_prompt}
+st.info("App generated - implementation needed")
+"""
+
+            # Generate MCP server code
+            mcp_prompt = f"""Create an MCP (Model Context Protocol) server for this Streamlit app: {app_name}
+
+The app does: {app_prompt}
+
+Generate a Python MCP server that exposes this functionality as tools for AI agents.
+Include proper MCP protocol implementation, tool definitions, and error handling."""
+
+            if openai_client:
+                try:
+                    resp = openai_client.responses.create(
+                        model=OPENAI_MODEL,
+                        input=[{"role": "user", "content": mcp_prompt}],
+                        temperature=0.3,
+                        max_output_tokens=1500,
+                    )
+                    mcp_code = resp.output[0].content[0].text
+                except Exception:
+                    pass
+            
+            if not mcp_code and anthropic_client:
+                try:
+                    resp = anthropic_client.messages.create(
+                        model=ANTHROPIC_MODEL,
+                        max_tokens=1500,
+                        temperature=0.3,
+                        messages=[{"role": "user", "content": mcp_prompt}]
+                    )
+                    mcp_code = resp.content[0].text
+                except Exception:
+                    pass
+
+            if not mcp_code:
+                mcp_code = f"""# MCP Server for {app_name}
+# TODO: Implement MCP server based on: {app_prompt}
+
+from mcp.server import Server
+from mcp.types import Tool
+
+server = Server("brainio-{app_name.lower().replace(' ', '-')}")
+
+@server.list_tools()
+async def list_tools():
+    return [
+        Tool(
+            name="{app_name.lower().replace(' ', '_')}",
+            description="{app_desc}",
+            inputSchema={{"type": "object", "properties": {{}}}}
+        )
+    ]
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict):
+    if name == "{app_name.lower().replace(' ', '_')}":
+        return {{"content": "Tool executed"}}
+    raise ValueError(f"Unknown tool: {{name}}")
+"""
+
+            # Save micro-app
+            micro_app = MicroApp(
+                name=app_name.strip(),
+                description=app_desc.strip(),
+                streamlit_code=streamlit_code,
+                mcp_server_code=mcp_code,
+                context=current_context,
+                created_by=user_name or "user"
+            )
+            session.add(micro_app)
+            session.commit()
+            st.success(f"Micro-app '{app_name}' created!")
+
+    # List existing micro-apps
+    st.markdown("---")
+    apps = session.query(MicroApp).filter(MicroApp.context == current_context, MicroApp.is_active == 1).order_by(MicroApp.created_at.desc()).all()
+    
+    if not apps:
+        st.info("No micro-apps yet. Create one above!")
+        return
+    
+    for app in apps:
+        with st.expander(f"📱 {app.name} - {app.description or 'No description'}"):
+            col1, col2, col3 = st.columns([1,1,1])
+            
+            with col1:
+                if st.button("Run App", key=f"run_app_{app.id}"):
+                    # Save code to temp file and run
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                        f.write(app.streamlit_code)
+                        temp_path = f.name
+                    st.code(f"Run: streamlit run {temp_path}")
+                    st.info("Copy the code above and run in terminal")
+            
+            with col2:
+                if st.button("View Code", key=f"view_code_{app.id}"):
+                    st.code(app.streamlit_code, language="python")
+            
+            with col3:
+                if st.button("MCP Server", key=f"mcp_{app.id}"):
+                    st.code(app.mcp_server_code, language="python")
+                    st.download_button(
+                        "Download MCP Server",
+                        app.mcp_server_code,
+                        f"{app.name.lower().replace(' ', '_')}_mcp_server.py",
+                        "text/python"
+                    )
+
+
+def teams_section(session):
+    st.subheader("Teams & Collaboration")
+    
+    # Create new team
+    with st.expander("Create Team", expanded=False):
+        team_name = st.text_input("Team Name", key="team_name")
+        team_desc = st.text_area("Description", key="team_desc")
+        if st.button("Create Team", key="create_team") and team_name.strip():
+            team = Team(name=team_name.strip(), description=team_desc.strip(), created_by=user_name or "user")
+            session.add(team)
+            session.commit()
+            # Add creator as owner
+            member = TeamMember(team_id=team.id, user_name=user_name or "user", role="owner")
+            session.add(member)
+            session.commit()
+            st.success(f"Team '{team_name}' created!")
+            st.rerun()
+    
+    # List teams
+    st.markdown("---")
+    teams = session.query(Team).order_by(Team.created_at.desc()).all()
+    
+    if not teams:
+        st.info("No teams yet. Create one above!")
+        return
+    
+    for team in teams:
+        with st.expander(f"👥 {team.name} - {team.description or 'No description'}"):
+            # Check if current user is member
+            membership = session.query(TeamMember).filter(
+                TeamMember.team_id == team.id,
+                TeamMember.user_name == (user_name or "user")
+            ).first()
+            
+            if membership:
+                st.caption(f"Your role: {membership.role}")
+                
+                # Team members
+                members = session.query(TeamMember).filter(TeamMember.team_id == team.id).all()
+                st.write("**Members:**")
+                for member in members:
+                    st.write(f"- {member.user_name} ({member.role})")
+                
+                # Add member (if admin/owner)
+                if membership.role in ["owner", "admin"]:
+                    with st.expander("Add Member"):
+                        new_member = st.text_input("Username", key=f"new_member_{team.id}")
+                        new_role = st.selectbox("Role", ["member", "viewer", "admin"], key=f"new_role_{team.id}")
+                        if st.button("Add", key=f"add_member_{team.id}") and new_member.strip():
+                            existing = session.query(TeamMember).filter(
+                                TeamMember.team_id == team.id,
+                                TeamMember.user_name == new_member.strip()
+                            ).first()
+                            if not existing:
+                                member = TeamMember(team_id=team.id, user_name=new_member.strip(), role=new_role)
+                                session.add(member)
+                                session.commit()
+                                st.success(f"Added {new_member} as {new_role}")
+                                st.rerun()
+                            else:
+                                st.error("User already in team")
+            else:
+                st.caption("You're not a member of this team")
+                if st.button("Request to Join", key=f"join_{team.id}"):
+                    # Auto-approve for demo (in real app, this would be a request)
+                    member = TeamMember(team_id=team.id, user_name=user_name or "user", role="member")
+                    session.add(member)
+                    session.commit()
+                    st.success("Joined team!")
+                    st.rerun()
+
+
 def main_app():
     session = SessionLocal()
-    tabs = st.tabs(["Artifacts", "Templates", "Co-create", "Importers"])
+    tabs = st.tabs(["Artifacts", "Templates", "Co-create", "Importers", "Appbeelder", "Teams"])
     with tabs[0]:
         artifacts_section(session)
     with tabs[1]:
@@ -748,6 +1054,10 @@ def main_app():
         cocreate_section(session)
     with tabs[3]:
         importers_section(session)
+    with tabs[4]:
+        appbeelder_section(session)
+    with tabs[5]:
+        teams_section(session)
 
 
 if __name__ == "__main__":
