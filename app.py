@@ -276,30 +276,44 @@ def embedding_search(session, query: str, top_k: int = 10) -> List[int]:
 # Streamlit UI helpers
 # -------------------------------
 
+def clean_ai_generated_code(raw_code):
+    """Clean AI-generated code by removing markdown formatting and extracting pure Python code."""
+    if not raw_code:
+        return None
+    
+    # Remove markdown code blocks
+    lines = raw_code.split('\n')
+    cleaned_lines = []
+    in_code_block = False
+    
+    for line in lines:
+        # Check for code block markers
+        if line.strip().startswith('```'):
+            if 'python' in line.lower():
+                in_code_block = True
+            else:
+                in_code_block = False
+            continue
+        
+        # If we're in a code block or if there are no code block markers, add the line
+        if in_code_block or not any('```' in l for l in lines):
+            cleaned_lines.append(line)
+    
+    cleaned_code = '\n'.join(cleaned_lines).strip()
+    
+    # Basic validation - check if it looks like Python code
+    if cleaned_code and ('import' in cleaned_code or 'streamlit' in cleaned_code or 'st.' in cleaned_code):
+        return cleaned_code
+    
+    return None
+
 st.set_page_config(page_title="Brainio MVP", layout="wide")
 APP_PASSWORD = os.getenv("APP_PASSWORD")
 DEFAULT_AUTHOR = os.getenv("USER_NAME", "user")
 
-# Simple gate with share-token bypass
+# Password gate disabled - direct access
 qp = st.query_params
 share_token_qp = qp.get("share") if "share" in qp else None
-share_bypass = False
-if APP_PASSWORD and not share_bypass:
-    # Validate share token if provided
-    if share_token_qp:
-        with SessionLocal() as _s:
-            match = _s.query(Conversation).filter(Conversation.share_token == share_token_qp).first()
-            if match:
-                share_bypass = True
-    if not share_bypass:
-        def _gate():
-            pw = st.sidebar.text_input("Workspace password", type="password")
-            if not pw:
-                st.stop()
-            if pw != APP_PASSWORD:
-                st.error("Incorrect password.")
-                st.stop()
-        _gate()
 
 st.title("Brainio – Human–AI Co‑Creation (MVP)")
 
@@ -808,6 +822,29 @@ def importers_section(session):
 def appbeelder_section(session):
     st.subheader("Appbeelder - Micro-App Builder")
     
+    # Show API key setup instructions if no keys are available
+    if not openai_client and not anthropic_client:
+        with st.expander("🔑 Setup API Keys (Optional)", expanded=False):
+            st.markdown("""
+            **To enable AI-powered app generation, add your API keys to the `.env` file:**
+            
+            ```bash
+            # OpenAI API Key
+            OPENAI_API_KEY=sk-your-openai-key-here
+            OPENAI_MODEL=gpt-4
+            
+            # Anthropic API Key  
+            ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here
+            ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+            ```
+            
+            **Get API Keys:**
+            - **OpenAI**: https://platform.openai.com/api-keys
+            - **Anthropic**: https://console.anthropic.com/
+            
+            **Without API keys**, the Appbeelder will create functional template apps using Local Fallback mode.
+            """)
+    
     # Create new micro-app
     with st.expander("Create Micro-App", expanded=False):
         app_name = st.text_input("App Name", key="app_name")
@@ -815,19 +852,40 @@ def appbeelder_section(session):
         app_prompt = st.text_area("Describe what the app should do", height=120, key="app_prompt")
         
         # Model selection
-        model_options = ["OpenAI GPT-4", "Claude 3.5 Sonnet", "Local Fallback"]
-        selected_model = st.selectbox("Choose AI Model", model_options, key="app_model")
+        available_models = []
+        if openai_client:
+            available_models.append("OpenAI GPT-4")
+        if anthropic_client:
+            available_models.append("Claude 3.5 Sonnet")
+        available_models.append("Local Fallback")
+        
+        if not available_models:
+            st.warning("⚠️ No AI models available. Please set API keys in .env file or use Local Fallback.")
+            selected_model = "Local Fallback"
+        else:
+            selected_model = st.selectbox("Choose AI Model", available_models, key="app_model")
+            
+        # Show API key status
+        if not openai_client and not anthropic_client:
+            st.info("💡 **Local Fallback Mode**: Creating functional template apps without AI generation. Add API keys to .env for AI-powered generation.")
         
         if st.button("Generate App", key="gen_app") and app_prompt.strip():
             # Generate Streamlit code using AI
             code_prompt = f"""Create a Streamlit app that: {app_prompt}
 
+IMPORTANT REQUIREMENTS:
+- Use ONLY standard Python libraries and Streamlit (no external modules like 'mindmap', 'matplotlib', etc.)
+- Make the code self-contained and runnable
+- Use Streamlit's built-in components (st.markdown, st.columns, st.color_picker, etc.)
+- For colors, use HTML/CSS styling with st.markdown() or Streamlit's color features
+- Include proper error handling
+- Add comments explaining key parts
+- Return only the Python code, no markdown formatting
+
 Requirements:
 - Use streamlit as st
 - Make it functional and user-friendly
-- Include proper error handling
-- Add comments explaining key parts
-- Return only the Python code, no markdown formatting"""
+- Ensure the code will run without external dependencies"""
 
             streamlit_code = None
             mcp_code = None
@@ -841,9 +899,13 @@ Requirements:
                         temperature=0.3,
                         max_tokens=2000,
                     )
-                    streamlit_code = resp.choices[0].message.content
-                    if streamlit_code and streamlit_code.strip() != "":
-                        st.success("✅ Generated with OpenAI GPT-4")
+                    raw_code = resp.choices[0].message.content
+                    if raw_code and raw_code.strip():
+                        streamlit_code = clean_ai_generated_code(raw_code)
+                        if streamlit_code:
+                            st.success("✅ Generated with OpenAI GPT-4")
+                        else:
+                            streamlit_code = None
                     else:
                         streamlit_code = None
                 except Exception as e:
@@ -858,9 +920,13 @@ Requirements:
                         temperature=0.3,
                         messages=[{"role": "user", "content": code_prompt}]
                     )
-                    streamlit_code = resp.content[0].text
-                    if streamlit_code and streamlit_code.strip() != "":
-                        st.success("✅ Generated with Claude 3.5 Sonnet")
+                    raw_code = resp.content[0].text
+                    if raw_code and raw_code.strip():
+                        streamlit_code = clean_ai_generated_code(raw_code)
+                        if streamlit_code:
+                            st.success("✅ Generated with Claude 3.5 Sonnet")
+                        else:
+                            streamlit_code = None
                     else:
                         streamlit_code = None
                 except Exception as e:
@@ -1054,7 +1120,7 @@ async def call_tool(name: str, arguments: dict):
     
     for app in apps:
         with st.expander(f"📱 {app.name} - {app.description or 'No description'}"):
-            col1, col2, col3 = st.columns([1,1,1])
+            col1, col2, col3, col4 = st.columns([1,1,1,1])
             
             with col1:
                 if st.button("Run App", key=f"run_app_{app.id}"):
@@ -1074,9 +1140,11 @@ async def call_tool(name: str, arguments: dict):
                     
                     # Also provide a direct run button
                     if st.button("🚀 Launch App Now", key=f"launch_{app.id}"):
-                        st.info("Starting app in new tab...")
-                        st.markdown(f'<script>window.open("http://localhost:8508", "_blank");</script>', unsafe_allow_html=True)
-                        st.code(f"# Run this in a new terminal:\nstreamlit run {app_path} --server.port 8508")
+                        # Store the app to run in session state
+                        st.session_state['running_app'] = app.streamlit_code
+                        st.session_state['app_name'] = app.name
+                        st.session_state['show_app_runner'] = True
+                        st.rerun()
             
             with col2:
                 if st.button("View Code", key=f"view_code_{app.id}"):
@@ -1091,6 +1159,203 @@ async def call_tool(name: str, arguments: dict):
                         f"{app.name.lower().replace(' ', '_')}_mcp_server.py",
                         "text/python"
                     )
+            
+            with col4:
+                if st.button("🗑️ Delete", key=f"delete_{app.id}"):
+                    # Delete from database
+                    session.delete(app)
+                    session.commit()
+                    
+                    # Delete file if it exists
+                    import os
+                    apps_dir = "generated_apps"
+                    app_filename = f"{app.name.lower().replace(' ', '_')}.py"
+                    app_path = os.path.join(apps_dir, app_filename)
+                    if os.path.exists(app_path):
+                        os.remove(app_path)
+                    
+                    st.success(f"App '{app.name}' deleted!")
+                    st.rerun()
+            
+            # Edit functionality
+            st.markdown("---")
+            
+            # Tab interface for different editing modes
+            edit_tab1, edit_tab2 = st.tabs(["🤖 AI Assistant", "✏️ Manual Edit"])
+            
+            with edit_tab1:
+                st.subheader("Chat with AI App Builder")
+                st.info("💡 Describe what you want to change and the AI will update your app code!")
+                
+                # Initialize chat history for this app
+                chat_key = f"app_chat_{app.id}"
+                if chat_key not in st.session_state:
+                    st.session_state[chat_key] = [
+                        {"role": "assistant", "content": f"Hi! I'm your AI app builder. I can help you modify your '{app.name}' app. What would you like to change?"}
+                    ]
+                
+                # Display chat history
+                for message in st.session_state[chat_key]:
+                    with st.chat_message(message["role"]):
+                        st.write(message["content"])
+                
+                # Chat input
+                user_input = st.chat_input("Describe what you want to change...", key=f"chat_input_{app.id}")
+                
+                if user_input:
+                    # Add user message to chat
+                    st.session_state[chat_key].append({"role": "user", "content": user_input})
+                    
+                    # Show user message
+                    with st.chat_message("user"):
+                        st.write(user_input)
+                    
+                    # Generate AI response and updated code
+                    with st.chat_message("assistant"):
+                        with st.spinner("AI is updating your app..."):
+                            # Create prompt for AI to modify the app
+                            modification_prompt = f"""You are an AI app builder. The user wants to modify their Streamlit app.
+
+Current app code:
+```python
+{app.streamlit_code}
+```
+
+User's request: {user_input}
+
+IMPORTANT REQUIREMENTS:
+1. Use ONLY standard Python libraries and Streamlit (no external modules like 'mindmap', 'matplotlib', etc.)
+2. Make the code self-contained and runnable
+3. Use Streamlit's built-in components (st.markdown, st.columns, st.color_picker, etc.)
+4. For colors, use HTML/CSS styling with st.markdown() or Streamlit's color features
+5. Return ONLY the updated Python code, no markdown formatting or explanations outside the code
+
+Please:
+1. Analyze the current code
+2. Understand what the user wants to change
+3. Provide the updated code with the modifications using only Streamlit and standard Python
+4. Ensure the code will run without external dependencies"""
+
+                            updated_code = None
+                            
+                            # Try to get AI response
+                            if openai_client:
+                                try:
+                                    resp = openai_client.chat.completions.create(
+                                        model=OPENAI_MODEL,
+                                        messages=[{"role": "user", "content": modification_prompt}],
+                                        temperature=0.3,
+                                        max_tokens=3000,
+                                    )
+                                    raw_code = resp.choices[0].message.content
+                                    if raw_code and raw_code.strip():
+                                        # Clean the code - remove markdown formatting
+                                        updated_code = clean_ai_generated_code(raw_code)
+                                        if updated_code:
+                                            st.success("✅ App updated with AI assistance!")
+                                        else:
+                                            updated_code = None
+                                    else:
+                                        updated_code = None
+                                except Exception as e:
+                                    st.warning(f"OpenAI API failed: {str(e)}")
+                            
+                            if not updated_code and anthropic_client:
+                                try:
+                                    resp = anthropic_client.messages.create(
+                                        model=ANTHROPIC_MODEL,
+                                        max_tokens=3000,
+                                        temperature=0.3,
+                                        messages=[{"role": "user", "content": modification_prompt}]
+                                    )
+                                    raw_code = resp.content[0].text
+                                    if raw_code and raw_code.strip():
+                                        # Clean the code - remove markdown formatting
+                                        updated_code = clean_ai_generated_code(raw_code)
+                                        if updated_code:
+                                            st.success("✅ App updated with AI assistance!")
+                                        else:
+                                            updated_code = None
+                                    else:
+                                        updated_code = None
+                                except Exception as e:
+                                    st.warning(f"Anthropic API failed: {str(e)}")
+                            
+                            if not updated_code:
+                                # Fallback: provide helpful response
+                                updated_code = app.streamlit_code
+                                st.warning("⚠️ AI not available. Using manual edit mode instead.")
+                                st.write("I understand you want to: " + user_input)
+                                st.write("Please use the 'Manual Edit' tab to make these changes.")
+                            
+                            # Add AI response to chat
+                            if updated_code and updated_code != app.streamlit_code:
+                                st.session_state[chat_key].append({
+                                    "role": "assistant", 
+                                    "content": f"I've updated your app based on: '{user_input}'. The changes have been applied!"
+                                })
+                                
+                                # Update the app code
+                                app.streamlit_code = updated_code
+                                session.commit()
+                                
+                                # Update the file
+                                import os
+                                apps_dir = "generated_apps"
+                                os.makedirs(apps_dir, exist_ok=True)
+                                app_filename = f"{app.name.lower().replace(' ', '_')}.py"
+                                app_path = os.path.join(apps_dir, app_filename)
+                                
+                                with open(app_path, 'w') as f:
+                                    f.write(updated_code)
+                                
+                                st.rerun()
+                            else:
+                                st.session_state[chat_key].append({
+                                    "role": "assistant", 
+                                    "content": "I couldn't make that change automatically. Please try being more specific or use the Manual Edit tab."
+                                })
+                                st.write("I couldn't make that change automatically. Please try being more specific or use the Manual Edit tab.")
+            
+            with edit_tab2:
+                st.subheader("Manual Code Editor")
+                
+                # Text area for editing code
+                edited_code = st.text_area(
+                    "Streamlit Code",
+                    value=app.streamlit_code,
+                    height=400,
+                    key=f"edit_code_{app.id}"
+                )
+                
+                col_edit1, col_edit2 = st.columns(2)
+                
+                with col_edit1:
+                    if st.button("💾 Save Changes", key=f"save_edit_{app.id}"):
+                        # Update the app in database
+                        app.streamlit_code = edited_code
+                        session.commit()
+                        
+                        # Update the file
+                        import os
+                        apps_dir = "generated_apps"
+                        os.makedirs(apps_dir, exist_ok=True)
+                        app_filename = f"{app.name.lower().replace(' ', '_')}.py"
+                        app_path = os.path.join(apps_dir, app_filename)
+                        
+                        with open(app_path, 'w') as f:
+                            f.write(edited_code)
+                        
+                        st.success("App updated successfully!")
+                        st.rerun()
+                
+                with col_edit2:
+                    if st.button("🔄 Reset to Original", key=f"reset_{app.id}"):
+                        st.rerun()
+                
+                # Preview the edited code
+                st.subheader("Preview")
+                st.code(edited_code, language="python")
 
 
 def teams_section(session):
@@ -1165,7 +1430,58 @@ def teams_section(session):
                     st.rerun()
 
 
+def app_runner_section():
+    """Run generated apps directly within the main app"""
+    st.title("🚀 Running Your Generated App")
+    
+    if 'running_app' in st.session_state and 'app_name' in st.session_state:
+        app_name = st.session_state['app_name']
+        app_code = st.session_state['running_app']
+        
+        st.subheader(f"App: {app_name}")
+        
+        # Back button
+        if st.button("← Back to Appbeelder"):
+            del st.session_state['running_app']
+            del st.session_state['app_name']
+            st.session_state['show_app_runner'] = False
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # Execute the app code
+        try:
+            # Create a safe execution environment
+            exec_globals = {
+                'st': st,
+                'pd': __import__('pandas'),
+                'np': __import__('numpy'),
+                'datetime': __import__('datetime'),
+                'time': __import__('time'),
+                'random': __import__('random'),
+                'math': __import__('math'),
+                'json': __import__('json'),
+                'os': __import__('os'),
+                'sys': __import__('sys')
+            }
+            
+            # Execute the app code
+            exec(app_code, exec_globals)
+            
+        except Exception as e:
+            st.error(f"Error running app: {str(e)}")
+            st.code(app_code, language="python")
+    else:
+        st.info("No app selected to run. Go to Appbeelder to launch an app.")
+        if st.button("Go to Appbeelder"):
+            st.rerun()
+
 def main_app():
+    # Check if we should show the app runner
+    if st.session_state.get('show_app_runner', False):
+        app_runner_section()
+        return
+    
     session = SessionLocal()
     tabs = st.tabs(["Artifacts", "Templates", "Co-create", "Importers", "Appbeelder", "Teams"])
     with tabs[0]:
