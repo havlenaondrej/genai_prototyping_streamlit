@@ -814,6 +814,10 @@ def appbeelder_section(session):
         app_desc = st.text_area("Description", key="app_desc")
         app_prompt = st.text_area("Describe what the app should do", height=120, key="app_prompt")
         
+        # Model selection
+        model_options = ["OpenAI GPT-4", "Claude 3.5 Sonnet", "Local Fallback"]
+        selected_model = st.selectbox("Choose AI Model", model_options, key="app_model")
+        
         if st.button("Generate App", key="gen_app") and app_prompt.strip():
             # Generate Streamlit code using AI
             code_prompt = f"""Create a Streamlit app that: {app_prompt}
@@ -828,20 +832,25 @@ Requirements:
             streamlit_code = None
             mcp_code = None
             
-            # Try OpenAI first, then Anthropic
-            if openai_client:
+            # Use selected model
+            if selected_model == "OpenAI GPT-4" and openai_client:
                 try:
-                    resp = openai_client.responses.create(
+                    resp = openai_client.chat.completions.create(
                         model=OPENAI_MODEL,
-                        input=[{"role": "user", "content": code_prompt}],
+                        messages=[{"role": "user", "content": code_prompt}],
                         temperature=0.3,
-                        max_output_tokens=2000,
+                        max_tokens=2000,
                     )
-                    streamlit_code = resp.output[0].content[0].text
-                except Exception:
-                    pass
+                    streamlit_code = resp.choices[0].message.content
+                    if streamlit_code and streamlit_code.strip() != "":
+                        st.success("✅ Generated with OpenAI GPT-4")
+                    else:
+                        streamlit_code = None
+                except Exception as e:
+                    st.warning(f"OpenAI API failed: {str(e)}")
+                    streamlit_code = None
             
-            if not streamlit_code and anthropic_client:
+            elif selected_model == "Claude 3.5 Sonnet" and anthropic_client:
                 try:
                     resp = anthropic_client.messages.create(
                         model=ANTHROPIC_MODEL,
@@ -850,18 +859,119 @@ Requirements:
                         messages=[{"role": "user", "content": code_prompt}]
                     )
                     streamlit_code = resp.content[0].text
-                except Exception:
-                    pass
+                    if streamlit_code and streamlit_code.strip() != "":
+                        st.success("✅ Generated with Claude 3.5 Sonnet")
+                    else:
+                        streamlit_code = None
+                except Exception as e:
+                    st.warning(f"Anthropic API failed: {str(e)}")
+                    streamlit_code = None
             
-            if not streamlit_code:
-                streamlit_code = f"""import streamlit as st
+            # Always use fallback if no code generated or if Local Fallback selected
+            if not streamlit_code or selected_model == "Local Fallback":
+                st.info("Using Local Fallback - creating functional template app")
+                # Create a more functional fallback app
+                streamlit_code = f'''import streamlit as st
+import pandas as pd
+import datetime
 
 st.title("{app_name}")
 st.write("{app_desc}")
 
-# TODO: Implement based on: {app_prompt}
-st.info("App generated - implementation needed")
-"""
+# Basic app structure based on: {app_prompt}
+st.header("App Features")
+
+# Add some interactive elements
+if "todo" in "{app_prompt}".lower():
+    st.subheader("Todo List")
+    todo = st.text_input("Add a new todo")
+    if st.button("Add Todo"):
+        st.success(f"Added: {{todo}}")
+    
+    # Simple todo list
+    todos = ["Sample todo 1", "Sample todo 2"]
+    for i, todo in enumerate(todos):
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write(f"• {{todo}}")
+        with col2:
+            if st.button("Delete", key=f"del_{{i}}"):
+                st.success("Todo deleted!")
+
+elif "finance" in "{app_prompt}".lower():
+    st.subheader("Finance Tracker")
+    income = st.number_input("Monthly Income", value=5000)
+    expenses = st.number_input("Monthly Expenses", value=3000)
+    savings = income - expenses
+    st.metric("Monthly Savings", f"${{savings}}")
+    
+    if savings > 0:
+        st.success("Great job saving money!")
+    else:
+        st.warning("You're spending more than you earn!")
+
+elif "recipe" in "{app_prompt}".lower():
+    st.subheader("Recipe Manager")
+    recipe_name = st.text_input("Recipe Name")
+    ingredients = st.text_area("Ingredients (one per line)")
+    instructions = st.text_area("Instructions")
+    
+    if st.button("Save Recipe"):
+        st.success(f"Recipe '{{recipe_name}}' saved!")
+
+elif "mind map" in "{app_prompt}".lower():
+    st.subheader("Mind Map Creator")
+    
+    # Text input for mind map content
+    text_input = st.text_area("Enter text to create mind map from:", height=100)
+    
+    if st.button("Generate Mind Map"):
+        if text_input:
+            # Simple mind map visualization
+            st.success("Mind Map Generated!")
+            
+            # Parse text into concepts
+            words = text_input.split()
+            concepts = [word.strip('.,!?;:') for word in words if len(word) > 3]
+            concepts = list(set(concepts))[:10]  # Limit to 10 unique concepts
+            
+            # Display as a simple mind map
+            st.subheader("Mind Map Structure:")
+            center_concept = concepts[0] if concepts else "Main Topic"
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col2:
+                st.markdown(f"### 🎯 {{center_concept}}")
+            
+            # Display related concepts
+            if len(concepts) > 1:
+                st.subheader("Related Concepts:")
+                for i, concept in enumerate(concepts[1:], 1):
+                    st.write(f"• {{concept}}")
+            
+            # Simple visualization
+            st.subheader("Visual Mind Map:")
+            st.info("💡 **Center**: {{center_concept}}")
+            for concept in concepts[1:6]:  # Show first 5 related concepts
+                st.write(f"  └── {{concept}}")
+        else:
+            st.warning("Please enter some text to create a mind map!")
+
+else:
+    # Generic app
+    st.subheader("Data Input")
+    name = st.text_input("Name")
+    age = st.number_input("Age", min_value=0, max_value=120)
+    email = st.text_input("Email")
+    
+    if st.button("Submit"):
+        st.success(f"Hello {{name}}! You are {{age}} years old.")
+        st.write(f"Email: {{email}}")
+
+st.markdown("---")
+st.info("This is a generated app template. Customize it based on your needs!")
+'''
 
             # Generate MCP server code
             mcp_prompt = f"""Create an MCP (Model Context Protocol) server for this Streamlit app: {app_name}
@@ -871,19 +981,19 @@ The app does: {app_prompt}
 Generate a Python MCP server that exposes this functionality as tools for AI agents.
 Include proper MCP protocol implementation, tool definitions, and error handling."""
 
-            if openai_client:
+            if selected_model == "OpenAI GPT-4" and openai_client:
                 try:
-                    resp = openai_client.responses.create(
+                    resp = openai_client.chat.completions.create(
                         model=OPENAI_MODEL,
-                        input=[{"role": "user", "content": mcp_prompt}],
+                        messages=[{"role": "user", "content": mcp_prompt}],
                         temperature=0.3,
-                        max_output_tokens=1500,
+                        max_tokens=1500,
                     )
-                    mcp_code = resp.output[0].content[0].text
+                    mcp_code = resp.choices[0].message.content
                 except Exception:
                     pass
             
-            if not mcp_code and anthropic_client:
+            elif selected_model == "Claude 3.5 Sonnet" and anthropic_client:
                 try:
                     resp = anthropic_client.messages.create(
                         model=ANTHROPIC_MODEL,
@@ -895,7 +1005,7 @@ Include proper MCP protocol implementation, tool definitions, and error handling
                 except Exception:
                     pass
 
-            if not mcp_code:
+            if not mcp_code:  # Fallback MCP code
                 mcp_code = f"""# MCP Server for {app_name}
 # TODO: Implement MCP server based on: {app_prompt}
 
@@ -948,13 +1058,25 @@ async def call_tool(name: str, arguments: dict):
             
             with col1:
                 if st.button("Run App", key=f"run_app_{app.id}"):
-                    # Save code to temp file and run
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                    # Create a permanent file in the apps directory
+                    import os
+                    apps_dir = "generated_apps"
+                    os.makedirs(apps_dir, exist_ok=True)
+                    
+                    app_filename = f"{app.name.lower().replace(' ', '_')}.py"
+                    app_path = os.path.join(apps_dir, app_filename)
+                    
+                    with open(app_path, 'w') as f:
                         f.write(app.streamlit_code)
-                        temp_path = f.name
-                    st.code(f"Run: streamlit run {temp_path}")
-                    st.info("Copy the code above and run in terminal")
+                    
+                    st.success(f"App saved to: {app_path}")
+                    st.code(f"Run: streamlit run {app_path}")
+                    
+                    # Also provide a direct run button
+                    if st.button("🚀 Launch App Now", key=f"launch_{app.id}"):
+                        st.info("Starting app in new tab...")
+                        st.markdown(f'<script>window.open("http://localhost:8508", "_blank");</script>', unsafe_allow_html=True)
+                        st.code(f"# Run this in a new terminal:\nstreamlit run {app_path} --server.port 8508")
             
             with col2:
                 if st.button("View Code", key=f"view_code_{app.id}"):
